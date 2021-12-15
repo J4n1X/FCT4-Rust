@@ -3,9 +3,16 @@
 version = 3
 
 [[package]]
+name = "bufreaderwriter"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c633d2120a905933d2774950ffc293ebafa3677c81050a13a1aace40e38bd3b1"
+
+[[package]]
 name = "fct4_rust"
 version = "0.1.0"
 dependencies = [
+ "bufreaderwriter",
  "pathdiff",
  "walkdir",
 ]

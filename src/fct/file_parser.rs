@@ -1,4 +1,4 @@
-use std::fs::{self,File};
+use std::fs::{self};
 use std::path::PathBuf;
 use std::io::Read;
 use crate::fct::fs_operations;
@@ -18,7 +18,7 @@ impl FileParser {
                 if file_info.permissions().readonly() {
                     return Err("File is readonly");
                 }
-                parser.file_path = match fs_operations::format_path(&root_dir, &file_path) {
+                parser.file_path = match fs_operations::format_path(root_dir, file_path) {
                     Ok(path) => path,
                     Err(_) => return Err("Could not format path")
                 };
@@ -42,7 +42,7 @@ impl FileParser {
         }
     }
 
-    pub fn from_archive(file: &mut File) -> Result<Self, &'static str> {
+    pub fn from_archive<R: Read>(file: &mut R) -> Result<Self, &'static str> {
         const PROPERTY_FIELD_LEN: usize = 8;
         let mut parser = FileParser::default();
         let mut buffer = [0u8; PROPERTY_FIELD_LEN];

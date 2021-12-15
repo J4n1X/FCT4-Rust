@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom};
+use bufreaderwriter::BufReaderWriter;
 use std::path::PathBuf;
 use crate::fct::file_parser::FileParser;
 use crate::fct::error::*;
@@ -11,7 +12,7 @@ const ARCHIVE_HEADER_MAGIC: &str = "FCT";
 
 pub struct FctArchive {
     pub chunk_size: u16,
-    pub archive_file: File,
+    pub archive_file: BufReaderWriter<File>,
     pub archive_path: PathBuf, 
     headers: Vec<FileParser>,
     headers_stale: bool
@@ -31,7 +32,8 @@ impl FctArchive {
             .truncate(true)
             .open(archive_path) {
             Ok(file) => {
-                let mut archive_file = file;
+                let mut archive_file = BufReaderWriter::new_writer(file);
+                //let mut archive_file = file;
                 archive_file.write(ARCHIVE_HEADER_MAGIC.as_bytes()).expect("Failed to write archive header");
                 archive_file.write(&chunk_size.to_le_bytes()).expect("Failed to write chunk size");
                 Ok(FctArchive {
@@ -58,7 +60,8 @@ impl FctArchive {
             .open(archive_path)
         {
             Ok(file) => {
-                let mut archive_file = file;
+                let mut archive_file = BufReaderWriter::new_reader(file);
+                //let mut archive_file = file;
                 archive_file.read_exact(&mut file_header_buffer).expect("Could not read archive header.");
                 if &file_header_buffer[..3] != ARCHIVE_HEADER_MAGIC.as_bytes() {
                     println!("Invalid archive header");
@@ -152,7 +155,7 @@ impl FctArchive {
 
     // TODO: Implement with large buffers to avoid overhead
     // writes file data to the archive
-    fn write_file_to_archive(&mut self, file: &mut File, header: &FileParser) -> Result<(), &'static str>{
+    fn write_file_to_archive<Reader: Read + Seek>(&mut self, file: &mut Reader, header: &FileParser) -> Result<(), &'static str>{
         let mut file_buffer = Vec::with_capacity(self.chunk_size as usize);
         for _ in 0..header.chunk_count {
             file_buffer.clear();
@@ -175,7 +178,7 @@ impl FctArchive {
     }
 
     // TODO: Implement with large buffers to avoid overhead
-    fn write_file_from_archive(&mut self, file: &mut File, header: &FileParser, fill: bool) -> Result<(), &'static str>{
+    fn write_file_from_archive<Writer: Write + Seek>(&mut self, file: &mut Writer, header: &FileParser, fill: bool) -> Result<(), &'static str>{
         let mut file_buffer = Vec::with_capacity(self.chunk_size as usize);
         for _ in 0..header.chunk_count {
             file_buffer.clear();
@@ -241,7 +244,12 @@ impl FctArchive {
     pub fn add_file(&mut self, file_path: &PathBuf) -> Result<(), &'static str>{
         self.archive_file.seek(SeekFrom::End(0)).expect("Could not seek to end of archive");
         
-        let mut file = unwrap_or_return_error!(File::open(file_path.as_path()), "Error adding file: Could not open file");
+        let mut file = match File::open(file_path){
+            Ok(f) => BufReaderWriter::new_reader(f),
+            Err(_) => {
+                return Err("Error adding file: Could not open file");
+            }
+        };
         let current_dir = std::env::current_dir().unwrap();
         let parser = unwrap_or_return_error!(
             FileParser::from_file(
@@ -303,17 +311,19 @@ impl FctArchive {
             return Ok(());
         }
 
-        let mut file = unwrap_or_return_error!(
-            OpenOptions::new()
+        let file = match OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
-                .open(file_path), 
-            "Error extracting file: Could not create file"
-        );
+                .open(file_path) {
+            Ok(f) => BufReaderWriter::new_writer(f),
+            Err(_) => {
+                return Err("Error extracting file: Could not create file");
+            }
+        };
         // prepend header file path 
         header.file_path = output_folder.join(&header.file_path);
-        self.write_file_from_archive(&mut file, &header, false)  
+        self.write_file_from_archive(&mut BufReaderWriter::new_writer(file), &header, false)  
     }
 
     // this is more sophisticated than adding files because of optimisations
@@ -373,7 +383,7 @@ impl FctArchive {
                 .write(true)
                 .create(true)
                 .open(&header.file_path) {
-                    Ok(f) => f,
+                    Ok(f) => BufReaderWriter::new_writer(f),
                     Err(_) => {
                         //println!("Error opening file for extracting: {}", e);
                         failed_files.push(self.headers[i as usize].file_path.clone());
