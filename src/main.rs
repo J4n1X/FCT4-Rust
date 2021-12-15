@@ -176,6 +176,10 @@ fn main() {
         "l" | "list" => {
             // unimplemented!("List mode is not implemented yet");
             // get next argument and parse to PathBuf
+            if args.len() < 3 {
+                println!("No archive path specified");
+                return;
+            }
             let archive_path: PathBuf = PathBuf::from(&args[2]);
             let mut archive = match FctArchive::open(&archive_path) {
                 Ok(opened_archive) => {

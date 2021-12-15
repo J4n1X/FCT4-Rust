@@ -6,15 +6,15 @@ version = 3
 name = "fct4_rust"
 version = "0.1.0"
 dependencies = [
- "relative-path",
+ "pathdiff",
  "walkdir",
 ]
 
 [[package]]
-name = "relative-path"
-version = "1.6.0"
+name = "pathdiff"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73d4caf086b102ab49d0525b721594a555ab55c6556086bbe52a430ad26c3bd7"
+checksum = "a3bf70094d203e07844da868b634207e71bfab254fe713171fae9a6e751ccf31"
 
 [[package]]
 name = "same-file"

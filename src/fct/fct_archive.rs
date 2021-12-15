@@ -109,16 +109,29 @@ impl FctArchive {
 
     fn seek_data(&mut self, file_parser: &FileParser) -> Result<(), &'static str> {
         // seek chunks
-        for _ in 0..(file_parser.chunk_count + 1) {
-            match self.archive_file.seek(SeekFrom::Current(self.chunk_size as i64)){
-                Ok(_) => {},
+        let byte_count: i64 = (if file_parser.last_chunk_size > 0 {1} else {0} + file_parser.chunk_count as i64) * self.chunk_size as i64;
+        if byte_count < 0 {
+            println!("Negative byte count, probably overflow, attempting slow seek");
+            for _ in 0..(file_parser.chunk_count + 1) {
+                match self.archive_file.seek(SeekFrom::Current(self.chunk_size as i64)){
+                    Ok(_) => {},
+                    Err(e) => {
+                        println!("Error seeking over file: {}", e);
+                        return Err("Error seeking over file");
+                    }
+                }
+            }
+            Ok(())
+        }
+        else {
+            match self.archive_file.seek(SeekFrom::Current(byte_count)){
+                Ok(_) => Ok(()),
                 Err(e) => {
                     println!("Error seeking over file: {}", e);
-                    return Err("Error seeking over file");
+                    Err("Error seeking over file")
                 }
             }
         }
-        Ok(())
     }
 
     fn seek_to_entry(&mut self, entry_index: u32) -> Result<(), &'static str> {
@@ -137,28 +150,31 @@ impl FctArchive {
         Err("Could not find entry")
     }
 
+    // TODO: Implement with large buffers to avoid overhead
     // writes file data to the archive
     fn write_file_to_archive(&mut self, file: &mut File, header: &FileParser) -> Result<(), &'static str>{
         let mut file_buffer = Vec::with_capacity(self.chunk_size as usize);
         for _ in 0..header.chunk_count {
             file_buffer.clear();
-            /*let bytes_read = */unwrap_or_return_error!(
+            unwrap_or_return_error!(
                 std::io::Read::by_ref(file).take(self.chunk_size as u64).read_to_end(&mut file_buffer), 
                 "Could not read file"
             );
             unwrap_or_return_error!(self.archive_file.write(&file_buffer),"Could not write to archive");
         }
-        file_buffer.clear();
-        unwrap_or_return_error!(
-            std::io::Read::by_ref(file).take(self.chunk_size as u64).read_to_end(&mut file_buffer), 
-            "Could not read file"
-        );
-        file_buffer.resize(self.chunk_size as usize, 0);
-        unwrap_or_return_error!(self.archive_file.write(&file_buffer),"Could not write to archive");
-        
-        return Ok(());
+        if header.last_chunk_size > 0 {
+            file_buffer.clear();
+            unwrap_or_return_error!(
+                std::io::Read::by_ref(file).take(self.chunk_size as u64).read_to_end(&mut file_buffer), 
+                "Could not read file"
+            );
+            file_buffer.resize(self.chunk_size as usize, 0);
+            unwrap_or_return_error!(self.archive_file.write(&file_buffer),"Could not write to archive");
+        }
+        Ok(())
     }
 
+    // TODO: Implement with large buffers to avoid overhead
     fn write_file_from_archive(&mut self, file: &mut File, header: &FileParser, fill: bool) -> Result<(), &'static str>{
         let mut file_buffer = Vec::with_capacity(self.chunk_size as usize);
         for _ in 0..header.chunk_count {
@@ -174,25 +190,30 @@ impl FctArchive {
                 "Error extracting file: Could not write file"
             );
         }
-        file_buffer.clear();
-        unwrap_or_return_error!(
-            std::io::Read::by_ref(&mut self.archive_file)
-                .take(self.chunk_size as u64)
-                .read_to_end(&mut file_buffer),
-            "Could not read file"
-        );
-        if fill {
-            file_buffer.resize(self.chunk_size as usize, 0);
+        if header.last_chunk_size > 0 {
+            file_buffer.clear();
+            unwrap_or_return_error!(
+                std::io::Read::by_ref(&mut self.archive_file)
+                    .take(self.chunk_size as u64)
+                    .read_to_end(&mut file_buffer),
+                "Could not read file"
+            );
+            if fill {
+                file_buffer.resize(self.chunk_size as usize, 0);
+            }
+            else {
+                file_buffer.resize(header.last_chunk_size as usize, 0);
+            }
+            match file.write(&file_buffer) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    println!("Error extracting file: {}", e);
+                    Err("Error extracting file")
+                }
+            }
         }
         else {
-            file_buffer.resize(header.last_chunk_size as usize, 0);
-        }
-        match file.write(&file_buffer) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                println!("Error extracting file: {}", e);
-                Err("Error extracting file")
-            }
+            Ok(())
         }
     }
 
@@ -217,21 +238,20 @@ impl FctArchive {
     }        
 
     
-    pub fn add_file(&mut self, file_path: &PathBuf, verbose: bool) -> Result<(), &'static str>{
+    pub fn add_file(&mut self, file_path: &PathBuf) -> Result<(), &'static str>{
         self.archive_file.seek(SeekFrom::End(0)).expect("Could not seek to end of archive");
-        if verbose {
-            println!("Adding file: {}", file_path.display());
-        }
         
         let mut file = unwrap_or_return_error!(File::open(file_path.as_path()), "Error adding file: Could not open file");
+        let current_dir = std::env::current_dir().unwrap();
         let parser = unwrap_or_return_error!(
             FileParser::from_file(
                 &file_path,
-                &std::env::current_dir().unwrap(),
+                &current_dir,
                 self.chunk_size
             ),
             "Error adding file: Could not create file parser"
         );
+        println!("Adding file: {}", parser.file_path.display());
         unwrap_or_return_error!(
             self.archive_file.write(&parser.generate_header().unwrap()),
             "Could not write file header"
@@ -243,7 +263,7 @@ impl FctArchive {
     pub fn add_files(&mut self, file_paths: &Vec<PathBuf>) -> Vec<PathBuf>{
         let mut failed_files: Vec<PathBuf> = Vec::new();
         for file_path in file_paths {
-            match self.add_file(&file_path, true) {
+            match self.add_file(&file_path) {
                 Ok(_) => {},
                 Err(e) => {
                     println!("Error adding file: {}", e);

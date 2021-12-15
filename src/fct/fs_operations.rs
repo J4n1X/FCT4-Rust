@@ -1,4 +1,5 @@
-use relative_path::RelativePath;
+//use relative_path::RelativePath;
+use pathdiff;
 use std::path::PathBuf;
 use std::fs::{self};
 use walkdir::WalkDir;
@@ -53,11 +54,25 @@ pub fn expand_directory(path: &PathBuf) -> Vec<PathBuf> {
     return files;
 }
 
+// default function for all OSes
+#[cfg(not(target_os = "windows"))]
 pub fn format_path(root_dir: &PathBuf, file_path: &PathBuf) -> Result<PathBuf, &'static str> {
-    let return_path = PathBuf::from(
-        RelativePath::new(root_dir.to_str().unwrap())
-        .relative(RelativePath::new(file_path.to_str().unwrap()))
-        .as_str()
-    );
-    Ok(return_path)
+    match pathdiff::diff_paths(file_path, root_dir) {
+        Some(path) => Ok(path),
+        None => Err("Could not get relative path")
+    }
+}
+
+// special function for windows
+#[cfg(target_os = "windows")]
+pub fn format_path(root_dir: &PathBuf, file_path: &PathBuf) -> Result<PathBuf, &'static str> {
+    // if you're using std::fs::current_dir() you need canonicalize it first
+    let root_dir_canonical = match fs::canonicalize(root_dir) {
+        Ok(p) => p,
+        Err(_) => return Err("Could not get canonical path for root directory")
+    };
+    match pathdiff::diff_paths(file_path, &root_dir_canonical) {
+        Some(path) => Ok(path),
+        None => Err("Could not get relative path")
+    }
 }
