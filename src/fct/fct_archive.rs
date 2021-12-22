@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write, Seek, SeekFrom};
+use std::io::{Read, Write, Seek, SeekFrom, BufWriter, BufReader};
 use bufreaderwriter::BufReaderWriter;
 use std::path::PathBuf;
 use crate::fct::file_parser::FileParser;
@@ -245,7 +245,7 @@ impl FctArchive {
         self.archive_file.seek(SeekFrom::End(0)).expect("Could not seek to end of archive");
         
         let mut file = match File::open(file_path){
-            Ok(f) => BufReaderWriter::new_reader(f),
+            Ok(f) => BufReader::new(f),
             Err(_) => {
                 return Err("Error adding file: Could not open file");
             }
@@ -312,7 +312,6 @@ impl FctArchive {
         }
 
         let file = match OpenOptions::new()
-                .read(true)
                 .write(true)
                 .create(true)
                 .open(file_path) {
@@ -353,6 +352,7 @@ impl FctArchive {
         }
 
         indices.sort();
+        let mut prev_directory: PathBuf = self.headers[0].file_path.parent().unwrap().to_path_buf();
         for i in 0..self.headers.len() {
             if !indices.contains(&(i as u32)) {
                 self.seek_file();
@@ -361,8 +361,8 @@ impl FctArchive {
                 let mut header = self.headers[i as usize].clone();
                 let orig_header_size: i64 = header.get_header_size() as i64;
                 header.file_path = output_folder.join(&header.file_path);
-
-                if !header.file_path.parent().unwrap().exists() {
+                let cur_directory = header.file_path.parent().unwrap();
+                if cur_directory != prev_directory {
                     match std::fs::create_dir_all(header.file_path.parent().unwrap()) {
                         Ok(_) => {},
                         Err(e) => {
@@ -371,6 +371,7 @@ impl FctArchive {
                             continue;
                         }
                     }
+                    prev_directory = cur_directory.to_path_buf();
                 }
 
                 println!("Extracting file: {}", header.file_path.display());
@@ -379,11 +380,10 @@ impl FctArchive {
                 self.archive_file.seek(SeekFrom::Current(orig_header_size)).expect("Could not seek to file");
                 // write out file
                 let mut out_file = match OpenOptions::new()
-                .read(true)
                 .write(true)
                 .create(true)
                 .open(&header.file_path) {
-                    Ok(f) => BufReaderWriter::new_writer(f),
+                    Ok(f) => BufWriter::new(f),
                     Err(_) => {
                         //println!("Error opening file for extracting: {}", e);
                         failed_files.push(self.headers[i as usize].file_path.clone());
