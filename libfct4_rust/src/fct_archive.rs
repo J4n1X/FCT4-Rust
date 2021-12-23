@@ -2,8 +2,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom, BufWriter, BufReader};
 use bufreaderwriter::BufReaderWriter;
 use std::path::PathBuf;
-use crate::fct::file_parser::FileParser;
-use crate::fct::error::*;
+use crate::file_parser::FileParser;
+use crate::error::*;
 
 //const DEFAULT_CHUNK_SIZE: u16 = 256;
 const MAX_CHUNK_SIZE: u16 = 65535;

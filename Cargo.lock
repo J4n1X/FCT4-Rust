@@ -12,6 +12,13 @@ checksum = "c633d2120a905933d2774950ffc293ebafa3677c81050a13a1aace40e38bd3b1"
 name = "fct4_rust"
 version = "0.1.0"
 dependencies = [
+ "libfct4_rust",
+]
+
+[[package]]
+name = "libfct4_rust"
+version = "0.1.0"
+dependencies = [
  "bufreaderwriter",
  "pathdiff",
  "walkdir",

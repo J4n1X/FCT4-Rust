@@ -1,9 +1,11 @@
 [package]
-name = "fct4_rust"
+name = "libfct4_rust"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libfct4_rust = { path = "libfct4_rust" }
+walkdir = "2"
+pathdiff = "0.1.0"
+bufreaderwriter = "0.1.2"

@@ -1,7 +1,7 @@
 use std::fs::{self};
 use std::path::PathBuf;
 use std::io::Read;
-use crate::fct::fs_operations;
+use crate::fs_operations;
 
 #[derive(Default, Debug, Clone)]
 pub struct FileParser {

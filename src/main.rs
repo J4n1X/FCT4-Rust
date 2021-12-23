@@ -1,6 +1,4 @@
-mod fct;
-
-use fct::{fs_operations, fct_archive::FctArchive};
+use libfct4_rust::{fs_operations, fct_archive::FctArchive};
 use std::path::PathBuf;
 
 fn show_help(program_name: &String) {
