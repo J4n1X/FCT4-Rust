@@ -2,8 +2,9 @@
 name = "fct4_rust"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libfct4_rust = { path = "libfct4_rust" }
+libfct4 = { path = "libfct4_rust" }
