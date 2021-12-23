@@ -9,6 +9,7 @@ description= "Implementation of FCT Version 4 (Devised by Janick Eicher) in Rust
 license = "MIT"
 keywords= ["archive", "files"]
 cathegories = ["data-structures", "encoding", "filesystem"]
+readme = "../README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
