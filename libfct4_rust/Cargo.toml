@@ -1,6 +1,6 @@
 [package]
 name = "libfct4"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Janick Eicher"]
 documentation = "https://docs.rs/libfct4"
