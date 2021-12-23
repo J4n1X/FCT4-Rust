@@ -12,12 +12,14 @@ checksum = "c633d2120a905933d2774950ffc293ebafa3677c81050a13a1aace40e38bd3b1"
 name = "fct4_rust"
 version = "0.1.0"
 dependencies = [
- "libfct4_rust",
+ "libfct4",
 ]
 
 [[package]]
-name = "libfct4_rust"
+name = "libfct4"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a1709bfc822a4d62fd68e5e03a712b0139345eaae5d9139ad0ed59d0a086390"
 dependencies = [
  "bufreaderwriter",
  "pathdiff",
