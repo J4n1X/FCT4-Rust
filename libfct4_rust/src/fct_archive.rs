@@ -19,7 +19,10 @@ pub struct FctArchive {
 }
 
 #[allow(dead_code)]
+/// The main archive class
 impl FctArchive {
+
+    // Create a new archive from the given path and the chunk size
     pub fn create_new(archive_path: &PathBuf, chunk_size: u16) -> Result<Self, &'static str>{
         if chunk_size > MAX_CHUNK_SIZE {
             return Err("Chunk size is too big");
@@ -52,6 +55,7 @@ impl FctArchive {
         }
     }
 
+    // Open an existing archive from the given path and get the chunk size from its metadata
     pub fn open(archive_path: &PathBuf) -> Result<Self, &'static str>{
         let mut file_header_buffer = [0u8; ARCHIVE_HEADER_SIZE];
         match OpenOptions::new()
@@ -86,12 +90,13 @@ impl FctArchive {
         }
     }
 
+    // Seek to the start of the file entries
     fn seek_to_start(&mut self) {
         self.archive_file.seek(SeekFrom::Start(ARCHIVE_HEADER_SIZE as u64))
             .expect("Could not seek to start of archive");
     }
 
-    // seek over file while reading the header
+    // Seek over file while reading the header
     fn seek_file(&mut self) -> Option<FileParser> {
 
         let parsed_file = match FileParser::from_archive(&mut self.archive_file){
@@ -177,7 +182,6 @@ impl FctArchive {
         Ok(())
     }
 
-    // TODO: Implement with large buffers to avoid overhead
     fn write_file_from_archive<Writer: Write + Seek>(&mut self, file: &mut Writer, header: &FileParser, fill: bool) -> Result<(), &'static str>{
         let mut file_buffer = Vec::with_capacity(self.chunk_size as usize);
         for _ in 0..header.chunk_count {
@@ -220,6 +224,7 @@ impl FctArchive {
         }
     }
 
+    /// Get the file headers of the entries in the archive and refresh them if necessary
     pub fn get_headers(&mut self) -> &Vec<FileParser> {
         if !self.headers_stale {
             return &self.headers;
@@ -240,7 +245,7 @@ impl FctArchive {
         return &self.headers;
     }        
 
-    
+    /// Add a file to the archive and mark the file headers as stale
     pub fn add_file(&mut self, file_path: &PathBuf) -> Result<(), &'static str>{
         self.archive_file.seek(SeekFrom::End(0)).expect("Could not seek to end of archive");
         
@@ -264,10 +269,11 @@ impl FctArchive {
             self.archive_file.write(&parser.generate_header().unwrap()),
             "Could not write file header"
         );
+        self.headers_stale = true;
         self.write_file_to_archive(&mut file, &parser)
     }
 
-    // Add files and return list of failed files
+    /// Add files and return list of failed files, then mark the file headers as stale
     pub fn add_files(&mut self, file_paths: &Vec<PathBuf>) -> Vec<PathBuf>{
         let mut failed_files: Vec<PathBuf> = Vec::new();
         for file_path in file_paths {
@@ -279,6 +285,7 @@ impl FctArchive {
                 }
             };
         }
+        self.headers_stale = true;
         failed_files
     }
 
@@ -326,6 +333,7 @@ impl FctArchive {
     }
 
     // this is more sophisticated than adding files because of optimisations
+    /// Extract a file from the archive to the output folder, creating subdirectories if necessary
     pub fn extract_files(&mut self, output_folder: &PathBuf ,indices: &mut Vec<u32>) -> Vec<PathBuf>{
         self.seek_to_start();
         if self.headers_stale {
@@ -423,6 +431,7 @@ impl FctArchive {
     }
 
     // remove files by moving non-matched items to a new archive. Returns the new archive
+    /// Remove the files at the indices given from the archive and mark the file headers as stale
     pub fn remove_files(&mut self, file_indices: &Vec<u32>) -> Result<(), &'static str>{
         if self.headers.len() == 0 {
             return Err("No files in archive");
