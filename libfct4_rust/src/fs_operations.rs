@@ -66,7 +66,7 @@ pub fn format_path<'a, P: ?Sized>(root_dir: &'a P, file_path: &'a P) -> Result<P
 // special function for windows
 #[cfg(target_os = "windows")]
 pub fn format_path<'a, P: ?Sized>(root_dir: &'a P, file_path: &'a P) -> Result<PathBuf, &'static str> where P : AsRef<Path>, &'a Path: From<&'a P>  {
-    // if you're using std::fs::current_dir() you need canonicalize it first
+    // if you're using std::env::current_dir() you need canonicalize it first
     let root_dir_canonical = match fs::canonicalize(root_dir) {
         Ok(p) => p,
         Err(_) => return Err("Could not get canonical path for root directory")

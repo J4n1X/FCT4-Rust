@@ -17,9 +17,9 @@ dependencies = [
 
 [[package]]
 name = "libfct4"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a1709bfc822a4d62fd68e5e03a712b0139345eaae5d9139ad0ed59d0a086390"
+checksum = "466f390a43fc63453e0593aa573d8ba50323dae3d37a1e53b35e91e1f4aa3301"
 dependencies = [
  "bufreaderwriter",
  "pathdiff",
