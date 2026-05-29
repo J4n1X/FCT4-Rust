@@ -1,230 +1,160 @@
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write, Seek, SeekFrom, BufWriter, BufReader};
-use bufreaderwriter::BufReaderWriter;
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use crate::file_parser::FileParser;
-use crate::error::*;
 
-//const DEFAULT_CHUNK_SIZE: u16 = 256;
+use bufreaderwriter::BufReaderWriter;
+
+use crate::error::FctError;
+use crate::file_parser::FileParser;
+
 const MAX_CHUNK_SIZE: u16 = 65535;
 const ARCHIVE_HEADER_SIZE: usize = 5;
-const ARCHIVE_HEADER_MAGIC: &str = "FCT";
+const ARCHIVE_HEADER_MAGIC: &[u8; 3] = b"FCT";
+
+/// I/O buffer size for bulk data transfers (1 MiB).
+const IO_BUFFER_SIZE: usize = 1 << 20;
 
 pub struct FctArchive {
     pub chunk_size: u16,
     pub archive_file: BufReaderWriter<File>,
-    pub archive_path: PathBuf, 
+    pub archive_path: PathBuf,
     headers: Vec<FileParser>,
-    headers_stale: bool
+    headers_stale: bool,
 }
 
-#[allow(dead_code)]
-/// The main archive class
+/// The main archive struct
 impl FctArchive {
-
-    // Create a new archive from the given path and the chunk size
-    pub fn create_new(archive_path: &PathBuf, chunk_size: u16) -> Result<Self, &'static str>{
+    /// Create a new archive at the given path with the specified chunk size
+    pub fn create_new(archive_path: &PathBuf, chunk_size: u16) -> Result<Self, FctError> {
         if chunk_size > MAX_CHUNK_SIZE {
-            return Err("Chunk size is too big");
+            return Err(FctError::InvalidChunkSize);
         }
-        let chunk_size = chunk_size;
-        match OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
-            .open(archive_path) {
-            Ok(file) => {
-                let mut archive_file = BufReaderWriter::new_writer(file);
-                //let mut archive_file = file;
-                archive_file.write(ARCHIVE_HEADER_MAGIC.as_bytes()).expect("Failed to write archive header");
-                archive_file.write(&chunk_size.to_le_bytes()).expect("Failed to write chunk size");
-                Ok(FctArchive {
-                    chunk_size: chunk_size,
-                    archive_file: archive_file,
-                    archive_path: archive_path.to_path_buf(),
-                    headers: Vec::new(),
-                    headers_stale: false
-                })
-            },
-            Err(_) => {
-                println!("Error creating archive: Could not create file.");
-                //let error_message = format!("{}", e);
-                return Err("Error creating archive: Could not create file.");
-            }
-        }
+            .open(archive_path)?;
+        let mut archive_file = BufReaderWriter::new_writer(file);
+        archive_file.write_all(ARCHIVE_HEADER_MAGIC)?;
+        archive_file.write_all(&chunk_size.to_le_bytes())?;
+        Ok(FctArchive {
+            chunk_size,
+            archive_file,
+            archive_path: archive_path.to_path_buf(),
+            headers: Vec::new(),
+            headers_stale: false,
+        })
     }
 
-    // Open an existing archive from the given path and get the chunk size from its metadata
-    pub fn open(archive_path: &PathBuf) -> Result<Self, &'static str>{
+    /// Open an existing archive and read its chunk size from the header
+    pub fn open(archive_path: &PathBuf) -> Result<Self, FctError> {
         let mut file_header_buffer = [0u8; ARCHIVE_HEADER_SIZE];
-        match OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(archive_path)
-        {
-            Ok(file) => {
-                let mut archive_file = BufReaderWriter::new_reader(file);
-                //let mut archive_file = file;
-                archive_file.read_exact(&mut file_header_buffer).expect("Could not read archive header.");
-                if &file_header_buffer[..3] != ARCHIVE_HEADER_MAGIC.as_bytes() {
-                    println!("Invalid archive header");
-                    return Err("Invalid archive header");
-                }
-                let chunk_size = u16::from_le_bytes(file_header_buffer[3..].try_into().expect("Invalid chunk size read!"));
-                let mut archive = FctArchive {
-                    chunk_size: chunk_size,
-                    archive_file: archive_file,
-                    archive_path: archive_path.to_path_buf(),
-                    headers: Vec::new(),
-                    headers_stale: true
-                };
-                archive.get_headers();
-
-                Ok(archive)
-            },
-            Err(e) => {
-                println!("Error opening archive: {}", e);
-                return Err("Error opening archive file");
-            }
+            .open(archive_path)?;
+        let mut archive_file = BufReaderWriter::new_reader(file);
+        archive_file.read_exact(&mut file_header_buffer)?;
+        if &file_header_buffer[..3] != ARCHIVE_HEADER_MAGIC {
+            return Err(FctError::InvalidHeader);
         }
+        let chunk_size = u16::from_le_bytes(
+            file_header_buffer[3..]
+                .try_into()
+                .map_err(|_| FctError::InvalidHeader)?,
+        );
+        let mut archive = FctArchive {
+            chunk_size,
+            archive_file,
+            archive_path: archive_path.to_path_buf(),
+            headers: Vec::new(),
+            headers_stale: true,
+        };
+        archive.get_headers();
+        Ok(archive)
     }
 
-    // Seek to the start of the file entries
+    /// Seek to the first file entry
     fn seek_to_start(&mut self) {
-        self.archive_file.seek(SeekFrom::Start(ARCHIVE_HEADER_SIZE as u64))
+        self.archive_file
+            .seek(SeekFrom::Start(ARCHIVE_HEADER_SIZE as u64))
             .expect("Could not seek to start of archive");
     }
 
-    // Seek over file while reading the header
-    fn seek_file(&mut self) -> Option<FileParser> {
-
-        let parsed_file = match FileParser::from_archive(&mut self.archive_file){
-            Ok(file) => file,
-            Err(_) => return None
-        };
-        // TODO: fast seeking
-        // seek chunks
-        match self.seek_data(&parsed_file) {
-            Ok(_) => {
-                return Some(parsed_file);
-            },
-            Err(_) => {
-                return None;
-            }
+    /// Copy exactly `n` bytes from the archive to `dest` using a 1 MiB buffer.
+    fn copy_bytes_to<W: Write>(&mut self, dest: &mut W, n: u64) -> Result<(), FctError> {
+        if n == 0 {
+            return Ok(());
         }
-    }
-
-    fn seek_data(&mut self, file_parser: &FileParser) -> Result<(), &'static str> {
-        // seek chunks
-        let byte_count: i64 = (if file_parser.last_chunk_size > 0 {1} else {0} + file_parser.chunk_count as i64) * self.chunk_size as i64;
-        if byte_count < 0 {
-            println!("Negative byte count, probably overflow, attempting slow seek");
-            for _ in 0..(file_parser.chunk_count + 1) {
-                match self.archive_file.seek(SeekFrom::Current(self.chunk_size as i64)){
-                    Ok(_) => {},
-                    Err(e) => {
-                        println!("Error seeking over file: {}", e);
-                        return Err("Error seeking over file");
-                    }
-                }
-            }
-            Ok(())
-        }
-        else {
-            match self.archive_file.seek(SeekFrom::Current(byte_count)){
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    println!("Error seeking over file: {}", e);
-                    Err("Error seeking over file")
-                }
-            }
-        }
-    }
-
-    fn seek_to_entry(&mut self, entry_index: u32) -> Result<(), &'static str> {
-        let mut current_index = 0;
-        self.seek_to_start();
-        // limit by length of vector for safety
-        for index in 0..self.headers.len() {
-            if current_index == entry_index {
-                return Ok(());
-            }
-            for _ in 0..(self.headers[index].chunk_count + 1) {
-                unwrap_or_return_error!(self.archive_file.seek(SeekFrom::Current(self.chunk_size as i64)), "Error seeking over file");
-            }
-            current_index += 1;
-        }
-        Err("Could not find entry")
-    }
-
-    // TODO: Implement with large buffers to avoid overhead
-    // writes file data to the archive
-    fn write_file_to_archive<Reader: Read + Seek>(&mut self, file: &mut Reader, header: &FileParser) -> Result<(), &'static str>{
-        let mut file_buffer = Vec::with_capacity(self.chunk_size as usize);
-        for _ in 0..header.chunk_count {
-            file_buffer.clear();
-            unwrap_or_return_error!(
-                std::io::Read::by_ref(file).take(self.chunk_size as u64).read_to_end(&mut file_buffer), 
-                "Could not read file"
-            );
-            unwrap_or_return_error!(self.archive_file.write(&file_buffer),"Could not write to archive");
-        }
-        if header.last_chunk_size > 0 {
-            file_buffer.clear();
-            unwrap_or_return_error!(
-                std::io::Read::by_ref(file).take(self.chunk_size as u64).read_to_end(&mut file_buffer), 
-                "Could not read file"
-            );
-            file_buffer.resize(self.chunk_size as usize, 0);
-            unwrap_or_return_error!(self.archive_file.write(&file_buffer),"Could not write to archive");
+        let buf_cap = (n as usize).min(IO_BUFFER_SIZE);
+        let mut buf = vec![0u8; buf_cap];
+        let mut remaining = n;
+        while remaining > 0 {
+            let to_read = (remaining as usize).min(buf_cap);
+            self.archive_file.read_exact(&mut buf[..to_read])?;
+            dest.write_all(&buf[..to_read])?;
+            remaining -= to_read as u64;
         }
         Ok(())
     }
 
-    fn write_file_from_archive<Writer: Write + Seek>(&mut self, file: &mut Writer, header: &FileParser, fill: bool) -> Result<(), &'static str>{
-        let mut file_buffer = Vec::with_capacity(self.chunk_size as usize);
-        for _ in 0..header.chunk_count {
-            file_buffer.clear();
-            unwrap_or_return_error!(
-                std::io::Read::by_ref(&mut self.archive_file)
-                    .take(self.chunk_size as u64)
-                    .read_to_end(&mut file_buffer), 
-                "Could not read file"
-            );
-            unwrap_or_return_error!(
-                file.write(&file_buffer), 
-                "Error extracting file: Could not write file"
-            );
+    /// Copy exactly `n` bytes from `src` into the archive using a 1 MiB buffer.
+    fn copy_bytes_from<R: Read>(&mut self, src: &mut R, n: u64) -> Result<(), FctError> {
+        if n == 0 {
+            return Ok(());
         }
-        if header.last_chunk_size > 0 {
-            file_buffer.clear();
-            unwrap_or_return_error!(
-                std::io::Read::by_ref(&mut self.archive_file)
-                    .take(self.chunk_size as u64)
-                    .read_to_end(&mut file_buffer),
-                "Could not read file"
-            );
-            if fill {
-                file_buffer.resize(self.chunk_size as usize, 0);
-            }
-            else {
-                file_buffer.resize(header.last_chunk_size as usize, 0);
-            }
-            match file.write(&file_buffer) {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    println!("Error extracting file: {}", e);
-                    Err("Error extracting file")
-                }
-            }
+        let buf_cap = (n as usize).min(IO_BUFFER_SIZE);
+        let mut buf = vec![0u8; buf_cap];
+        let mut remaining = n;
+        while remaining > 0 {
+            let to_read = (remaining as usize).min(buf_cap);
+            src.read_exact(&mut buf[..to_read])?;
+            self.archive_file.write_all(&buf[..to_read])?;
+            remaining -= to_read as u64;
         }
-        else {
-            Ok(())
-        }
+        Ok(())
     }
 
-    /// Get the file headers of the entries in the archive and refresh them if necessary
+    /// Write a file's data into the archive, zero-padding the last chunk.
+    fn write_file_to_archive<R: Read>(
+        &mut self,
+        src: &mut R,
+        header: &FileParser,
+    ) -> Result<(), FctError> {
+        // Bulk-copy all full chunks in one shot — no per-chunk loop.
+        let full_bytes = header.chunk_count as u64 * self.chunk_size as u64;
+        self.copy_bytes_from(src, full_bytes)?;
+        // Write the last partial chunk, zero-padded to chunk_size.
+        if header.last_chunk_size > 0 {
+            let mut last_buf = vec![0u8; self.chunk_size as usize];
+            src.read_exact(&mut last_buf[..header.last_chunk_size as usize])?;
+            self.archive_file.write_all(&last_buf)?;
+        }
+        Ok(())
+    }
+
+    /// Extract a file's data from the archive, trimming the last chunk to its actual size.
+    fn write_file_from_archive<W: Write>(
+        &mut self,
+        dest: &mut W,
+        header: &FileParser,
+    ) -> Result<(), FctError> {
+        // Bulk-copy all full chunks in one shot — no per-chunk loop.
+        let full_bytes = header.chunk_count as u64 * self.chunk_size as u64;
+        self.copy_bytes_to(dest, full_bytes)?;
+        // Write the last chunk trimmed to the actual file size.
+        if header.last_chunk_size > 0 {
+            let mut last_buf = vec![0u8; self.chunk_size as usize];
+            self.archive_file.read_exact(&mut last_buf)?;
+            dest.write_all(&last_buf[..header.last_chunk_size as usize])?;
+        }
+        Ok(())
+    }
+
+    /// Read and cache all file entry headers, recording each entry's data offset.
+    /// No-op when the cache is fresh.
     pub fn get_headers(&mut self) -> &Vec<FileParser> {
         if !self.headers_stale {
             return &self.headers;
@@ -232,257 +162,211 @@ impl FctArchive {
         self.headers.clear();
         self.seek_to_start();
         loop {
-            match self.seek_file() {
-                Some(file) => {
-                    self.headers.push(file);
-                },
-                None => {
-                    break;
-                }
+            let mut parser = match FileParser::from_archive(&mut self.archive_file) {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            // Record the absolute byte offset where this entry's data begins.
+            parser.data_offset = self
+                .archive_file
+                .seek(SeekFrom::Current(0))
+                .expect("Could not query archive position");
+            let data_len = parser.stored_data_size(self.chunk_size);
+            if self
+                .archive_file
+                .seek(SeekFrom::Current(data_len as i64))
+                .is_err()
+            {
+                self.headers.push(parser);
+                break;
             }
+            self.headers.push(parser);
         }
         self.headers_stale = false;
-        return &self.headers;
-    }        
+        &self.headers
+    }
 
-    /// Add a file to the archive and mark the file headers as stale
-    pub fn add_file(&mut self, file_path: &PathBuf) -> Result<(), &'static str>{
-        self.archive_file.seek(SeekFrom::End(0)).expect("Could not seek to end of archive");
-        
-        let mut file = match File::open(file_path){
-            Ok(f) => BufReader::new(f),
-            Err(_) => {
-                return Err("Error adding file: Could not open file");
-            }
-        };
-        let current_dir = std::env::current_dir().unwrap();
-        let parser = unwrap_or_return_error!(
-            FileParser::from_file(
-                &file_path,
-                &current_dir,
-                self.chunk_size
-            ),
-            "Error adding file: Could not create file parser"
-        );
+    /// Append a single file to the archive.
+    pub fn add_file(&mut self, file_path: &PathBuf) -> Result<(), FctError> {
+        self.archive_file.seek(SeekFrom::End(0))?;
+        let src_file = File::open(file_path)?;
+        let mut src = BufReader::with_capacity(IO_BUFFER_SIZE, src_file);
+        let current_dir = std::env::current_dir()?;
+        let parser = FileParser::from_file(file_path, &current_dir, self.chunk_size)?;
         println!("Adding file: {}", parser.file_path.display());
-        unwrap_or_return_error!(
-            self.archive_file.write(&parser.generate_header().unwrap()),
-            "Could not write file header"
-        );
+        self.archive_file.write_all(&parser.generate_header()?)?;
         self.headers_stale = true;
-        self.write_file_to_archive(&mut file, &parser)
+        self.write_file_to_archive(&mut src, &parser)
     }
 
-    /// Add files and return list of failed files, then mark the file headers as stale
-    pub fn add_files(&mut self, file_paths: &Vec<PathBuf>) -> Vec<PathBuf>{
-        let mut failed_files: Vec<PathBuf> = Vec::new();
-        for file_path in file_paths {
-            match self.add_file(&file_path) {
-                Ok(_) => {},
-                Err(e) => {
-                    println!("Error adding file: {}", e);
-                    failed_files.push(file_path.clone());
-                }
-            };
-        }
-        self.headers_stale = true;
-        failed_files
-    }
-
-    // This function probably isn't needed
-    pub fn extract_file(&mut self, output_folder: PathBuf, index: u32, output_path: &PathBuf) -> Result<(), &'static str>{
-        self.seek_to_start();
-        if !output_folder.exists() {
-            unwrap_or_return_error!(
-                std::fs::create_dir_all(&output_folder),
-                "Error extracting file: Could not create output folder"
-            );
-        }
-
-        for _ in 0..index {
-            match self.seek_file(){
-                Some(_) => {},
-                None => return Err("Could not seek to file")
+    /// Add multiple files; returns paths of any that failed.
+    pub fn add_files(&mut self, file_paths: &[PathBuf]) -> Vec<PathBuf> {
+        let mut failed: Vec<PathBuf> = Vec::new();
+        for path in file_paths {
+            if let Err(e) = self.add_file(path) {
+                println!("Error adding {}: {}", path.display(), e);
+                failed.push(path.clone());
             }
         }
+        self.headers_stale = true;
+        failed
+    }
 
-        let mut header = unwrap_or_return_error!(
-            FileParser::from_archive(&mut self.archive_file),
-            "Could not parse file header"
-        );
-        println!("Extracting file: {}", header.file_path.display());
-
-        let file_path = output_path.join(&header.file_path);
-        if file_path.exists() {
-            println!("File already exists, skipping");
+    /// Extract a single file by index into `output_path`.
+    pub fn extract_file(
+        &mut self,
+        output_folder: PathBuf,
+        index: u32,
+        output_path: &PathBuf,
+    ) -> Result<(), FctError> {
+        if self.headers_stale {
+            self.get_headers();
+        }
+        let header = self
+            .headers
+            .get(index as usize)
+            .ok_or(FctError::EntryNotFound)?
+            .clone();
+        if !output_folder.exists() {
+            std::fs::create_dir_all(&output_folder)?;
+        }
+        let out_path = output_path.join(&header.file_path);
+        if out_path.exists() {
+            println!("File already exists, skipping: {}", out_path.display());
             return Ok(());
         }
-
-        let file = match OpenOptions::new()
-                .write(true)
-                .create(true)
-                .open(file_path) {
-            Ok(f) => BufReaderWriter::new_writer(f),
-            Err(_) => {
-                return Err("Error extracting file: Could not create file");
+        if let Some(parent) = out_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
             }
-        };
-        // prepend header file path 
-        header.file_path = output_folder.join(&header.file_path);
-        self.write_file_from_archive(&mut BufReaderWriter::new_writer(file), &header, false)  
+        }
+        println!("Extracting file: {}", out_path.display());
+        let out_file = OpenOptions::new().write(true).create(true).open(&out_path)?;
+        let mut dest = BufWriter::with_capacity(IO_BUFFER_SIZE, out_file);
+        // Jump directly to this entry's data using the precomputed offset.
+        self.archive_file.seek(SeekFrom::Start(header.data_offset))?;
+        self.write_file_from_archive(&mut dest, &header)
     }
 
-    // this is more sophisticated than adding files because of optimisations
-    /// Extract a file from the archive to the output folder, creating subdirectories if necessary
-    pub fn extract_files(&mut self, output_folder: &PathBuf ,indices: &mut Vec<u32>) -> Vec<PathBuf>{
-        self.seek_to_start();
+    /// Extract files by index list; extracts all if `indices` is empty.
+    pub fn extract_files(
+        &mut self,
+        output_folder: &PathBuf,
+        indices: &mut Vec<u32>,
+    ) -> Vec<PathBuf> {
         if self.headers_stale {
             self.get_headers();
         }
         if !output_folder.exists() {
-            match std::fs::create_dir_all(output_folder) {
-                Ok(_) => {},
-                Err(e) => {
-                    println!("Error extracting files: Could not create output folder: {}", e);
-                    // fill vector with the paths of all indices
-                    let output_vector = indices.iter().map(|i| {
-                        self.headers[*i as usize].file_path.clone()
-                    }).collect();
-                    return output_vector;
-                }
+            if let Err(e) = std::fs::create_dir_all(output_folder) {
+                println!("Could not create output folder: {}", e);
+                return self.headers.iter().map(|h| h.file_path.clone()).collect();
             }
         }
-        let mut failed_files: Vec<PathBuf> = Vec::new();
-        if indices.len() == 0 {
-            for i in 0..self.headers.len() {
-                indices.push(i as u32);
-            }
-        }
+        // Build a HashSet for O(1) membership tests; empty = extract all.
+        let target_set: HashSet<u32> = if indices.is_empty() {
+            (0..self.headers.len() as u32).collect()
+        } else {
+            indices.iter().copied().collect()
+        };
 
-        indices.sort();
-        let mut prev_directory: PathBuf = self.headers[0].file_path.parent().unwrap().to_path_buf();
+        let mut failed: Vec<PathBuf> = Vec::new();
         for i in 0..self.headers.len() {
-            if !indices.contains(&(i as u32)) {
-                self.seek_file();
+            if !target_set.contains(&(i as u32)) {
+                continue;
             }
-            else{
-                let mut header = self.headers[i as usize].clone();
-                let orig_header_size: i64 = header.get_header_size() as i64;
-                header.file_path = output_folder.join(&header.file_path);
-                let cur_directory = header.file_path.parent().unwrap();
-                if cur_directory != prev_directory {
-                    match std::fs::create_dir_all(header.file_path.parent().unwrap()) {
-                        Ok(_) => {},
-                        Err(e) => {
-                            println!("Error extracting files: Could not create output folder: {}", e);
-                            failed_files.push(header.file_path.clone());
-                            continue;
-                        }
-                    }
-                    prev_directory = cur_directory.to_path_buf();
-                }
-
-                println!("Extracting file: {}", header.file_path.display());
-
-                // seek over header
-                self.archive_file.seek(SeekFrom::Current(orig_header_size)).expect("Could not seek to file");
-                // write out file
-                let mut out_file = match OpenOptions::new()
-                .write(true)
-                .create(true)
-                .open(&header.file_path) {
-                    Ok(f) => BufWriter::new(f),
-                    Err(_) => {
-                        //println!("Error opening file for extracting: {}", e);
-                        failed_files.push(self.headers[i as usize].file_path.clone());
+            let header = self.headers[i].clone();
+            let out_path = output_folder.join(&header.file_path);
+            if let Some(parent) = out_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        println!("Could not create {}: {}", parent.display(), e);
+                        failed.push(header.file_path.clone());
                         continue;
                     }
-                };
-                match self.write_file_from_archive(&mut out_file, &header, false) {
-                    Ok(_) => {},
-                    Err(_) => {
-                        //println!("Error extracting file data: {}", e);
-                        failed_files.push(PathBuf::from(&header.file_path));
-                    }
                 }
             }
+            println!("Extracting file: {}", out_path.display());
+            let out_file = match OpenOptions::new().write(true).create(true).open(&out_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    println!("Could not create {}: {}", out_path.display(), e);
+                    failed.push(header.file_path.clone());
+                    continue;
+                }
+            };
+            let mut dest = BufWriter::with_capacity(IO_BUFFER_SIZE, out_file);
+            // Jump directly to this entry's data using the precomputed offset.
+            self.archive_file
+                .seek(SeekFrom::Start(header.data_offset))
+                .expect("Could not seek to file data");
+            if let Err(e) = self.write_file_from_archive(&mut dest, &header) {
+                println!("Error extracting {}: {}", out_path.display(), e);
+                failed.push(header.file_path.clone());
+            }
         }
-        failed_files
+        failed
     }
 
     pub fn list_files(&mut self) {
         if self.headers_stale {
             self.get_headers();
         }
-        if self.headers.len() == 0 {
+        if self.headers.is_empty() {
             println!("No files in archive");
             return;
         }
-        for index in 0..self.headers.len() {
+        for (i, header) in self.headers.iter().enumerate() {
             println!(
-                "{}: {} {}", 
-                index + 1,
-                self.headers[index].file_path.display(),
-                self.headers[index].chunk_count as u64 
-                    * self.chunk_size as u64 
-                    + self.headers[index].last_chunk_size as u64
+                "{}: {} {}",
+                i + 1,
+                header.file_path.display(),
+                header.chunk_count as u64 * self.chunk_size as u64
+                    + header.last_chunk_size as u64
             );
         }
     }
 
-    // remove files by moving non-matched items to a new archive. Returns the new archive
-    /// Remove the files at the indices given from the archive and mark the file headers as stale
-    pub fn remove_files(&mut self, file_indices: &Vec<u32>) -> Result<(), &'static str>{
-        if self.headers.len() == 0 {
-            return Err("No files in archive");
+    /// Remove files by index, writing survivors to a temp archive then replacing the original.
+    pub fn remove_files(&mut self, file_indices: &[u32]) -> Result<(), FctError> {
+        if self.headers_stale {
+            self.get_headers();
         }
-
-        let mut tmp_archive = unwrap_or_return_error!(
-            FctArchive::create_new(&self.archive_path.with_extension("tmp"), self.chunk_size),
-            "Error removing files: Could not create temporary archive"
-        );
-        self.seek_to_start();
-        tmp_archive.seek_to_start();
-
-        let mut index = 0;
-        loop {
-            let header = match FileParser::from_archive(&mut self.archive_file) {
-                Ok(h) => h,
-                Err(_) => break
-            };
-
-            if !file_indices.contains(&(index as u32)) {
-                // write header to tmp archive
-                unwrap_or_return_error!(
-                    tmp_archive.archive_file.write(&header.generate_header().unwrap()),
-                    "Could not write file header to the temporary archive"
-                );
-                // write file to tmp archive
-                unwrap_or_return_error!(
-                    self.write_file_from_archive(&mut tmp_archive.archive_file, &header, true),
-                    "Could not write data to the temporary archive"
-                );
-            }
-            else {
+        if self.headers.is_empty() {
+            return Err(FctError::Custom("No files in archive"));
+        }
+        let tmp_path = self.archive_path.with_extension("tmp");
+        let mut tmp = FctArchive::create_new(&tmp_path, self.chunk_size)?;
+        let headers = self.headers.clone();
+        for (index, header) in headers.iter().enumerate() {
+            if file_indices.contains(&(index as u32)) {
                 println!("Removing file: {}", header.file_path.display());
-                unwrap_or_return_error!(
-                    self.seek_data(&header),
-                    "Could not seek over file data in the original archive"
-                );
+            } else {
+                // Seek to this entry's data and copy header + raw data verbatim to tmp.
+                self.archive_file
+                    .seek(SeekFrom::Start(header.data_offset))?;
+                tmp.archive_file.write_all(&header.generate_header()?)?;
+                let data_size = header.stored_data_size(self.chunk_size);
+                if data_size > 0 {
+                    let buf_cap = (data_size as usize).min(IO_BUFFER_SIZE);
+                    let mut buf = vec![0u8; buf_cap];
+                    let mut remaining = data_size;
+                    while remaining > 0 {
+                        let to_read = (remaining as usize).min(buf_cap);
+                        self.archive_file.read_exact(&mut buf[..to_read])?;
+                        tmp.archive_file.write_all(&buf[..to_read])?;
+                        remaining -= to_read as u64;
+                    }
+                }
             }
-            index += 1;
         }
-        std::fs::remove_file(self.archive_path.as_path()).expect("Error removing files: Could not remove old archive");
-        std::fs::rename(
-            tmp_archive.archive_path.as_path(),
-            self.archive_path.as_path()
-        ).expect("Error removing files: Could not rename temporary archive");
-        
-        // replace old self
-        self.archive_path = tmp_archive.archive_path;
-        self.archive_file = tmp_archive.archive_file;
-        self.headers = tmp_archive.headers;
+        std::fs::remove_file(&self.archive_path)?;
+        std::fs::rename(&tmp_path, &self.archive_path)?;
+        // The inode from tmp is now at self.archive_path; take its file handle.
+        // self.archive_path is already correct (unchanged).
+        self.archive_file = tmp.archive_file;
         self.headers_stale = true;
+        self.get_headers();
         Ok(())
     }
 }

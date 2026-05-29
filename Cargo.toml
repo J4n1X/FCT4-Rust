@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "libfct4_rust",
+    "fct_cli",
+]
+resolver = "2"
